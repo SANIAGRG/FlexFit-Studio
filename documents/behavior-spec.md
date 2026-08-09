@@ -2,7 +2,7 @@
 
 Per-router contract as it exists today, in unrefactored code. Written together with the characterization tests in `test/` so the spec has test evidence behind it — see `coverage-matrix.md` for the mapping. Priority order per the working brief: `bookings` → `corporate-bookings` → `reschedules` → `payments`; depth is not equal across routers.
 
-Status as of this session (Aug 8 work): `bookings` complete. `corporate-bookings` and `reschedules` in progress below. `payments` not started.
+Status: `bookings`, `corporate-bookings`, `reschedules`, and `payments` all complete as of Aug 9 work — this is the "all green against unrefactored code" checkpoint the working brief requires before any extraction begins.
 
 ---
 
@@ -143,6 +143,38 @@ Same ~11-step validation ladder, duplicated between the two (mutation throws `TR
 ### `history` (protected query)
 
 Returns the caller's past reschedules with denormalized from/to class name, time, and room via correlated subqueries. No pagination.
+
+---
+
+## `payments` router (`src/server/routers/payments.ts`)
+
+No occupancy or credit logic — the lightest of the four priority routers, hence the least depth here, per the brief's "don't give every router equal depth."
+
+### `mine` (protected query)
+
+Returns the caller's payments (id, amountCents, method, status, reference, createdAt) left-joined through `memberships` to `membershipPlans` for a denormalized `planName`, ordered by `createdAt` descending. Because the joins are `leftJoin`, a payment with no `membershipId` (or a membership whose plan was since deleted — not currently possible, no delete path exists for plans) still returns a row, with `planName: null`.
+
+### `all` (admin query)
+
+**Input:** `{ limit?: number = 100 }`. All payments, inner-joined to `users` for member name/email, ordered `createdAt` descending, capped at `limit`. Unlike `mine`, this is an inner join — a payment somehow orphaned from its user would silently vanish from this list rather than appearing with a null name. Not currently reachable (no user-delete path), noted for completeness.
+
+### `markPaid` (admin mutation)
+
+**Input:** `{ id: number }`.
+
+1. Payment must exist → `NOT_FOUND` `"Payment not found."`
+2. Payment must not already be `refunded` → `BAD_REQUEST` `"Refunded payments cannot be marked paid."`
+
+Any other status (`pending`, `paid`, or `failed`) is accepted and set to `paid` — including a payment that is already `paid` (idempotent no-op in effect, not specially detected or rejected). Returns the updated row.
+
+### `refund` (admin mutation)
+
+**Input:** `{ id: number }`.
+
+1. Payment must exist → `NOT_FOUND` `"Payment not found."`
+2. Payment status must be exactly `paid` → `BAD_REQUEST` `"Only paid payments can be refunded."` (so `pending`, `failed`, and already-`refunded` payments all hit this same message, not just `refunded` — asymmetric with `markPaid`'s more specific rejection message)
+
+Sets status to `refunded`. **Side effect:** if the payment has a `membershipId`, the associated membership's status is set to `cancelled` — unconditionally, regardless of how much of the membership period has elapsed or whether credits were already spent from it. There is no corresponding credit/class-attendance reversal — a member who refunded a payment after attending several classes on that membership keeps the classes; only the membership's `status` field changes. Returns the updated payment row (not the membership).
 
 ---
 

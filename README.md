@@ -4,11 +4,11 @@ Class booking and membership management for a single gym site. Members book clas
 
 ## Refactor notes
 
-This fork is mid-refactor: consolidating duplicated booking/reschedule logic in `src/server/routers/` without changing any existing behavior (same inputs, outputs, error codes, message strings, edge cases). Full reasoning lives in [`documents/`](./documents) — start at [`documents/README.md`](./documents/README.md). Short version:
+This fork consolidates duplicated booking/reschedule logic out of `src/server/routers/` and into `src/server/booking/`, without changing any existing behavior (same inputs, outputs, error codes, message strings, edge cases). Full reasoning lives in [`documents/`](./documents) — start at [`documents/README.md`](./documents/README.md). Short version:
 
-- **What's done:** test infrastructure (`vitest.config.ts`, `test/helpers/`), and behavior specs + characterization tests for `bookings`, `corporate-bookings`, and `reschedules` (47 tests, all passing against the current, unrefactored code — see [`documents/coverage-matrix.md`](./documents/coverage-matrix.md)).
-- **What's not done yet:** the actual extraction (`src/server/booking/`), `payments` tests, and anything in Tier 2.
-- **What deliberately won't change:** individual and corporate bookings stay on separate tables with separate capacity counts, including the "10-person room can hold 10 individual + 10 corporate bookings" quirk — merging that count would fix a bug that wasn't in scope. Full reasoning in [`documents/architecture-decisions.md`](./documents/architecture-decisions.md); the bug itself (and six others) is written up in [`documents/known-issues.md`](./documents/known-issues.md).
+- **What's done:** test infrastructure, behavior specs + characterization tests for all four priority routers — `bookings`, `corporate-bookings`, `reschedules`, `payments` (64 tests, all passing against the code both before and after the extraction below — see [`documents/coverage-matrix.md`](./documents/coverage-matrix.md)). The extraction itself: `hoursUntil`, the time/credit constants, the reschedule validation ladder, and capacity counting all now live in `src/server/booking/`, moved one file at a time with a full suite run and a clean typecheck after each ([`documents/architecture-decisions.md`](./documents/architecture-decisions.md)).
+- **What's not done yet:** anything in Tier 2 (see [`documents/architecture-decisions.md`](./documents/architecture-decisions.md) and the handover brief).
+- **What deliberately won't change:** individual and corporate bookings stay on separate tables with separate capacity counts, including the "10-person room can hold 10 individual + 10 corporate bookings" quirk — merging that count would fix a bug that wasn't in scope. Full reasoning in [`documents/architecture-decisions.md`](./documents/architecture-decisions.md); that bug (and seven others, one found via characterization testing itself) is written up in [`documents/known-issues.md`](./documents/known-issues.md).
 - **Run the tests:** `pnpm test`.
 
 ## Requirements

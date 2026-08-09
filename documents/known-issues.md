@@ -40,11 +40,11 @@ A waitlisted booking has `creditsUsed: 0` (set at creation in `bookings.book`, s
 
 ### 4. `reschedule` never checks membership status
 
-**Where:** `reschedules.ts`, `activeMembershipFor` is defined (lines 22-39) and never called.
+**Where:** originally `reschedules.ts`, where a dead `activeMembershipFor` helper (lines 22-39, byte-identical to the live one in `bookings.ts`) was defined and never called — the direct evidence this check was intended and dropped, not merely never considered. As of the Aug 9 `reschedule-rules.ts` extraction, that dead function no longer exists in source (removed as genuinely unreachable code during the rewrite of `reschedules.ts` — dead code has no runtime behavior, so removing it isn't a behavior change; see `decision-log.md`). The underlying bug is unchanged and still proven by test: `evaluateReschedule` in `src/server/booking/reschedule-rules.ts` still contains no membership check anywhere in its ladder.
 
-Neither `reschedule` nor `validateReschedule` verifies the member has an active, non-expired membership before letting them move to a different class. A member whose membership expired since their original booking can still reschedule freely. The dead `activeMembershipFor` function is the direct evidence this check was intended and dropped, not merely never considered.
+Neither `reschedule` nor `validateReschedule` verifies the member has an active, non-expired membership before letting them move to a different class. A member whose membership expired since their original booking can still reschedule freely.
 
-**Repro:** book a class while membership is active, then let the membership expire (or set `status: "expired"` / push `endDate` into the past), then call `reschedules.reschedule` with that booking. It succeeds.
+**Repro:** book a class while membership is active, then let the membership expire (or set `status: "expired"` / push `endDate` into the past), then call `reschedules.reschedule` with that booking. It succeeds. Reproduced in `test/reschedules.test.ts` › "documented bugs" › "#4 — reschedule succeeds with no active membership."
 
 ---
 

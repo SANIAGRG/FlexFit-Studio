@@ -1,6 +1,6 @@
 # Coverage matrix
 
-Every claim in `behavior-spec.md` mapped to the test that proves it, as of this session (Aug 8 work; `bookings`, `corporate-bookings`, `reschedules` done, `payments` not started). This is what turns "I preserved behavior" from a claim into a demonstration — before refactoring anything, every row below runs green against the untouched routers.
+Every claim in `behavior-spec.md` mapped to the test that proves it. As of Aug 9 work, all four priority routers (`bookings`, `corporate-bookings`, `reschedules`, `payments`) are covered — 64 tests, all green against the untouched routers (`pnpm test`, confirmed stable across repeated runs). This is what turns "I preserved behavior" from a claim into a demonstration, and closes the Aug 9 checkpoint the working brief requires before any extraction begins.
 
 ## `bookings`
 
@@ -29,7 +29,10 @@ Every claim in `behavior-spec.md` mapped to the test that proves it, as of this 
 | `waitlisted` position is 1-indexed, ordered by `bookedAt` | `bookings.test.ts` › `waitlisted` › "reports 1-indexed queue position ordered by booking time" |
 | Bug #8: same-second bookings tie at position 1 | `bookings.test.ts` › `waitlisted` › "gives every booking in the same wall-clock second the same position" |
 
-Not yet covered (Aug 9): `mine` (past/future filtering), `rosterFor`, `upcomingForMember`, `checkinCountFor` in isolation (checkinCountFor's corporate-blindness is covered from the corporate side — see below).
+| `mine` filters past bookings by default, includes them with `includePast: true` | `bookings.test.ts` › `mine` › "filters out past bookings by default but includes them with includePast: true" |
+| `checkinCountFor` only counts individual check-ins (mirror of bug #5, seen from this side) | `bookings.test.ts` › `checkinCountFor` › "only counts individual checkins…" |
+
+**Consciously not covered:** `rosterFor`, `upcomingForMember`. Both are a `select` + `join` + `where` with no conditional branches, no error paths beyond the existing staff-only guard (already characterized via the identically-shaped `markAttended` staff-only test), and no business rule to characterize — a test here would assert "the ORM returns the rows the ORM was asked for," which isn't a claim this refactor risks breaking. Revisit if either gains logic before the extraction lands.
 
 ## `corporateBookings`
 
@@ -46,7 +49,7 @@ Not yet covered (Aug 9): `mine` (past/future filtering), `rosterFor`, `upcomingF
 | Bug #1 (corporate half): promotion always happens, ledger deduction is conditional and can be skipped | `corporate-bookings.test.ts` › `cancel` › "promotes a waitlisted corporate booking even when the pool can't afford it…" |
 | Bug #5: `markAttended` inserts `bookingId: null`, ignores `source` input | `corporate-bookings.test.ts` › `markAttended` › "records a checkin with bookingId null and ignores the source input…" |
 
-Not yet covered (Aug 9): `mine`, `rosterFor`.
+**Consciously not covered:** `mine`, `rosterFor` — same reasoning as the individual-side equivalents above (plain projections, no branching logic).
 
 ## `reschedules`
 
@@ -59,11 +62,25 @@ Not yet covered (Aug 9): `mine`, `rosterFor`.
 | Bug #3: rescheduling a waitlisted booking produces a free `booked` seat | `reschedules.test.ts` › "documented bugs" › "#3 — rescheduling a waitlisted booking produces a free booked seat" |
 | Bug #4: `reschedule` ignores membership status entirely | `reschedules.test.ts` › "documented bugs" › "#4 — reschedule succeeds with no active membership…" |
 
-Not yet covered (Aug 9): the boundary case at exactly 4h (same technique as the bookings 12h boundary test, not yet applied here); no corporate path exists to test (confirmed absent, not a gap in coverage).
+| `reschedule` boundary: exactly 4h remaining is reschedulable (inclusive) | `reschedules.test.ts` › "reschedule — happy path" › "treats exactly 4h remaining as reschedulable…" |
+
+No corporate path exists to test here (confirmed absent — see `behavior-spec.md`, not a gap in coverage).
 
 ## `payments`
 
-Not started this session. Priority order per the working brief puts it last; will follow the same spec-plus-test pattern on Aug 9 before any refactor touches it.
+| Spec claim | Test |
+|---|---|
+| `mine` returns only the caller's payments, newest first, with plan name denormalized | `payments.test.ts` › `mine` › "returns the caller's own payments…" |
+| `mine` never returns another member's payments | `payments.test.ts` › `mine` › "does not return another member's payments" |
+| `all` is admin-only | `payments.test.ts` › `all` › "is admin-only" |
+| `all` lists across all members, respects `limit` | `payments.test.ts` › `all` › "lists payments across all members for admin, respecting the limit" |
+| `markPaid` accepts pending → paid | `payments.test.ts` › `markPaid` › "marks a pending payment as paid" |
+| `markPaid` rejects `refunded` → `BAD_REQUEST` | `payments.test.ts` › `markPaid` › "rejects marking a refunded payment as paid" |
+| `markPaid` rejects nonexistent → `NOT_FOUND` | `payments.test.ts` › `markPaid` › "rejects a nonexistent payment" |
+| `refund` sets `refunded`, cancels linked membership | `payments.test.ts` › `refund` › "refunds a paid payment and cancels the linked membership" |
+| `refund` with no `membershipId` touches no membership | `payments.test.ts` › `refund` › "refunds a paid payment with no membershipId…" |
+| `refund` rejects non-`paid` status (`pending`, `refunded`) → `BAD_REQUEST` | `payments.test.ts` › `refund` › "rejects refunding a payment that isn't paid (pending)" and "…an already-refunded payment" |
+| `refund` is admin-only | `payments.test.ts` › `refund` › "is admin-only" |
 
 ## `admin.classUtilisation`, `classes.list`
 
