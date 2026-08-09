@@ -3,14 +3,6 @@ import { createTestDb, type TestDb } from "./helpers/db";
 import { createTestCaller } from "./helpers/caller";
 import { makeUser, makeClass, fillClassBookings } from "./helpers/fixtures";
 
-/**
- * Characterization test: pins the CURRENT, WRONG behavior of
- * admin.classUtilisation before it is fixed. See documents/known-issues.md
- * bug #9. Do not "fix" this test to assert the correct values — its whole
- * purpose is to prove precisely what the buggy code did, so the fix commit
- * can flip these same assertions and make both the wrong and right numbers
- * visible in one diff.
- */
 describe("admin router", () => {
   let db: TestDb;
   let close: () => void;
@@ -25,16 +17,17 @@ describe("admin router", () => {
 
   describe("classUtilisation", () => {
     it(
-      "BUG (known-issues.md #9): reports the same booked count for every class " +
-        "regardless of how many bookings each one actually has",
+      "reports each class's own booked count, not a value shared across every row " +
+        "(regression test for known-issues.md #9 — a correlated-subquery bug " +
+        "that made every class report an identical, wrong count)",
       async () => {
-        // Drizzle renders the subquery's column references unqualified when
-        // the outer query has only one table in scope (no join present).
-        // Inside the subquery's own `FROM bookings`, the bare "id" then binds
-        // to bookings.id instead of the intended classes.id, so the WHERE
-        // clause becomes `bookings.class_id = bookings.id` — a condition that
-        // never references the outer class row at all. The reported count is
-        // therefore identical for every class in the result set.
+        // Was previously a raw sql subquery whose column references rendered
+        // unqualified (single-table outer scope), so the WHERE clause
+        // resolved entirely inside the subquery's own `bookings` scope
+        // (`bookings.class_id = bookings.id`) and never referenced the outer
+        // class row at all — every class reported the same fixed value.
+        // Fixed via a leftJoin + groupBy aggregate instead, which has no
+        // correlated subquery left to mis-qualify.
         const withBookings = await makeClass(db, { capacity: 10 });
         await fillClassBookings(db, withBookings, 3);
 
@@ -49,14 +42,27 @@ describe("admin router", () => {
         const withBookingsRow = rows.find((r) => r.id === withBookings.id);
         const withoutBookingsRow = rows.find((r) => r.id === withoutBookings.id);
 
-        // The headline symptom: two classes with genuinely different booking
-        // counts (3 vs. 0) report the identical "booked" value today.
-        expect(withBookingsRow?.booked).toBe(withoutBookingsRow?.booked);
-
-        // And it isn't coincidentally right for the class that does have
-        // bookings — the reported value is not the real count of 3.
-        expect(withBookingsRow?.booked).not.toBe(3);
+        expect(withBookingsRow?.booked).toBe(3);
+        expect(withoutBookingsRow?.booked).toBe(0);
       },
     );
+
+    it("returns exactly `limit` classes, correctly aggregated, even when one has many bookings", async () => {
+      // Guards against a leftJoin + groupBy regressing into counting
+      // pre-aggregation join rows instead of distinct classes.
+      const busyClass = await makeClass(db, { capacity: 30 });
+      await fillClassBookings(db, busyClass, 12);
+
+      const admin = await makeUser(db, { role: "admin" });
+      const rows = await createTestCaller(db, admin).admin.classUtilisation({
+        limit: 3,
+      });
+
+      expect(rows).toHaveLength(3);
+      const busyRow = rows.find((r) => r.id === busyClass.id);
+      if (busyRow) {
+        expect(busyRow.booked).toBe(12);
+      }
+    });
   });
 });

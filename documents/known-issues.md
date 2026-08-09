@@ -94,9 +94,9 @@ All capacity checks, credit checks, and balance updates are separate `select` th
 
 ---
 
-### 9. `admin.classUtilisation` reports the same booked count for every class — the report is non-functional
+### 9. `admin.classUtilisation` reports the same booked count for every class — the report is non-functional — **FIXED**
 
-**Found via characterization testing, not in the original brief's list. This is the exception to "document by default" — see Decision below.**
+**Found via characterization testing, not in the original brief's list. This is the exception to "document by default" — see Decision below. Fixed via `leftJoin` + `groupBy` (see the fix candidates below and `architecture-decisions.md`); the description below is left in the present tense as an accurate record of the bug that existed, not a claim about current behavior.**
 
 **Where:** `admin.ts` `classUtilisation` (~line 63-87). The `booked` column is a raw `sql` template subquery:
 
@@ -145,6 +145,19 @@ Every class currently reports `booked: 1` regardless of its actual booking count
 - `reschedules.ts:70,74,78,82,86` (`history`, five subqueries denormalizing from/to class name/time/room) — safe, confirmed via `.toSQL()`: the outer query already joins `classes` (`innerJoin(classes, eq(reschedules.fromClassId, classes.id))`), so every reference renders qualified (`"classes"."id" = "reschedules"."from_class_id"`), and even where it wouldn't, the specific column names involved (`from_class_id`, `to_class_id`) don't collide with any column in `classes`, so there's no name that could shadow-bind incorrectly the way `bookings.id`/`classes.id` did.
 
 So the actual finding is narrower and more precise than "raw subqueries are risky here": the bug requires *both* an unqualified render *and* a same-named column colliding across the two tables involved. Only one site has both.
+
+**Fix candidates, tested against real seeded data before picking one — not chosen by reasoning about them in the abstract:**
+
+1. **`sql.raw` explicit qualification.** Replace the template's `${classes.id}` reference with a raw literal `sql.raw('"classes"."id"')`, bypassing Drizzle's column-rendering logic entirely. Verified correct (`0, 4, 8, 0, 17, 4` against seeded data, matching a manually-correlated ground-truth query exactly). Smallest possible diff. **Rejected** despite working: a hardcoded raw string is exactly as invisible to a table rename, a type check, or a test as the original bug was — a `sql.raw` literal doesn't get flagged if `classes` is ever renamed, which is the same class of silent failure this bug already demonstrated is possible here.
+2. **Alias the outer table** (`alias(classes, "c")`, reference `c.id` in the subquery). This was the more "obvious"-looking fix — aliasing forces an explicit name onto the table, so it looks like it should force qualification. **Tested and found not to work.** Generated SQL: `select "id", "name", (... where "class_id" = "id" ...) from "classes" "c"` — the subquery reference still renders bare `"id"`, still collides with `bookings.id`, values still identical across all rows. Aliasing changes the table's *name* in the outer scope but not Drizzle's "how many tables are registered" count that actually drives the qualification decision, so it does nothing to fix this. Recorded here specifically so the next person who reaches for this "obvious" fix doesn't have to rediscover that it doesn't work.
+3. **Replace the correlated subquery with a `leftJoin` + `groupBy` aggregate.** `count(bookings.id)` over `classes.leftJoin(bookings, and(eq(bookings.classId, classes.id), inArray(bookings.status, [...])))`, grouped by `classes.id`. Verified correct against the same seeded data, including the zero-booking case (`HIIT Circuit`, `Boxing Fundamentals` both correctly return `0`, not `null` or a dropped row — `COUNT()` over a left join's null-padded row is `0` by SQL semantics). **Chosen.** No raw string anywhere; the whole query stays inside Drizzle's typed query builder, so a table rename would be caught at compile time instead of failing silently the way this bug did. It removes the mechanism that caused the bug (there's no longer a correlated subquery that could mis-qualify) rather than patching this one instance of it.
+
+**Two additional things verified before committing to option 3, since they're exactly the kind of side effect that's easy to wave through:**
+
+- **Row order.** The original query has no `ORDER BY` (a `.limit()` with implicit ordering), so row order was already unspecified per SQL semantics — but "unspecified" and "actually the same every time" are different claims, and only one of them is checkable. Ran both the buggy query and the `leftJoin`+`groupBy` candidate against the same seeded data four times each: both returned classes in the identical sequence (ascending `id`, `1..10`) on every run. Not adding an `ORDER BY` to "fix" this, per the reasoning that would itself be a new, undocumented behavior decision — the check was only to confirm the join+aggregate rewrite doesn't *change* an already-unordered result into a *differently* unordered one on real data.
+- **`limit` semantics.** Confirmed `LIMIT` applies after `GROUP BY`, not before — `limit=5` against seeded data returns exactly 5 distinct classes, correctly including `Advanced Spin` (id 5, 17 real bookings) with its correct `booked: 17`, not corrupted or truncated by the 17 raw join rows that exist for that class before grouping collapses them.
+
+**One more thing worth stating plainly rather than leaving for a reviewer to flag:** the fixed query selects `name`, `startsAt`, and `capacity` while grouping only by `classes.id`. SQLite permits this — unlike stricter engines, it doesn't require every selected column to be in the `GROUP BY` list or wrapped in an aggregate. It's correct here specifically because `id` is the primary key: each group has exactly one possible value for those columns (there's only one row per class), so there's no ambiguity for SQLite to resolve arbitrarily. This is a property of `id` being a primary key, not a lenient behavior being relied on to paper over something.
 
 **Decision: fix it. This is the one exception to "document by default" among the nine findings in this file.**
 

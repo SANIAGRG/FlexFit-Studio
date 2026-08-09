@@ -63,20 +63,34 @@ export const adminRouter = router({
   classUtilisation: adminProcedure
     .input(z.object({ limit: z.number().default(10) }).default({}))
     .query(async ({ ctx, input }) => {
+      // Was a correlated `sql` subquery here — Drizzle renders a subquery's
+      // column references unqualified when the outer query has only one
+      // table in scope, so `${classes.id}` rendered as bare "id" and
+      // resolved against the subquery's own `bookings` scope instead of the
+      // outer class row (bookings.class_id = bookings.id, true for every
+      // row). See documents/known-issues.md #9. A leftJoin + groupBy
+      // aggregate has no correlated subquery left to mis-qualify. Grouping
+      // only by classes.id (not name/startsAt/capacity too) is safe because
+      // id is the primary key — SQLite doesn't require the rest of the
+      // GROUP BY-functionally-dependent columns to be listed.
       const rows = await ctx.db
         .select({
           id: classes.id,
           name: classes.name,
           startsAt: classes.startsAt,
           capacity: classes.capacity,
-          booked: sql<number>`(
-            select count(*) from ${bookings}
-            where ${bookings.classId} = ${classes.id}
-              and ${bookings.status} in ('booked','attended')
-          )`.as("booked"),
+          booked: sql<number>`count(${bookings.id})`.as("booked"),
         })
         .from(classes)
+        .leftJoin(
+          bookings,
+          and(
+            eq(bookings.classId, classes.id),
+            inArray(bookings.status, ["booked", "attended"]),
+          ),
+        )
         .where(eq(classes.cancelled, false))
+        .groupBy(classes.id)
         .limit(input.limit);
 
       return rows.map((r) => ({

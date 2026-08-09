@@ -37,6 +37,14 @@ Both reference frameworks decline to prescribe a required layout — that's deli
 
 So the defense for `src/server/booking/` isn't "this is the standard layout" (there isn't one to point to) — it's: *the router composition already matched the tRPC reference; the actual problem was domain logic (the validation ladder, the occupancy counts, the constants) living inline inside procedures instead of being named and testable on its own. This refactor moves the logic out and leaves the composition — `_app.ts`, the router files themselves, their procedure-level shapes — alone.* `server/booking/` sits next to `server/routers/`, its only consumer, rather than at `src/domain/`, because nothing outside the routers needs it.
 
+## Bug #9 fix: `admin.classUtilisation`'s correlated-subquery bug
+
+Full bug writeup, the three candidates tested, and why two were rejected all live in `known-issues.md` #9 — not duplicated here. Summary of the call: **replace the correlated subquery with a `leftJoin` + `groupBy` aggregate** (`count(bookings.id)` over `classes.leftJoin(bookings, and(classId match, status filter))`, grouped by `classes.id`), rather than the smaller-diff `sql.raw` fix that also worked.
+
+This is the one place in the whole refactor where the smallest diff was deliberately *not* chosen. `sql.raw('"classes"."id"')` is one line and verified correct, but it reproduces the exact property that made the original bug possible in the first place: a piece of SQL identity (a table/column reference) that lives outside Drizzle's type system and is invisible to a rename, a type check, or a test until something actually breaks at runtime. The `leftJoin`+`groupBy` rewrite is a larger diff but removes the *mechanism* — there is no longer a correlated subquery anywhere in this query that could mis-qualify, rather than one instance of the mechanism being carefully patched. Consistent with this project's broader bias (see the `individual-vs-corporate` decision above) toward the smallest change that fully addresses the actual problem, not the smallest change that makes the symptom go away — the two aren't always the same fix.
+
 ## Status
 
 As of Aug 9: all four extractions above (`time.ts`, `constants.ts`, `reschedule-rules.ts`, `capacity.ts`) are landed. Full test suite (64 tests) green after each individual extraction, not just at the end — `pnpm test` was run after every file change, per the working brief's "full suite after every change." Typecheck (`npx tsc --noEmit`) clean throughout. `src/app/`, `src/components/`, `_app.ts`, and every router's public procedure signatures are byte-for-byte unchanged; only what was *inside* procedure bodies moved.
+
+`admin.classUtilisation`'s bug #9 fix (above) is the one deliberate exception to that "unchanged behavior" status — its output values change, by design, per the tension named explicitly in `known-issues.md` #9.
