@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import {
   corporateBookings,
   classes,
@@ -10,16 +10,9 @@ import {
   users,
 } from "@/db/schema";
 import { router, protectedProcedure, staffProcedure } from "../trpc";
-
-/**
- * Corporate members may cancel free of charge up to this many hours before
- * the class starts. Cancelling later still frees the spot but forfeits the credit.
- */
-export const CORPORATE_FREE_CANCELLATION_HOURS = 24;
-
-function hoursUntil(iso: string, now = new Date()): number {
-  return (new Date(iso).getTime() - now.getTime()) / 36e5;
-}
+import { hoursUntil } from "../booking/time";
+import { CORPORATE_FREE_CANCELLATION_HOURS } from "../booking/constants";
+import { countCorporateBooked } from "../booking/capacity";
 
 async function getCompanyForMember(
   db: typeof import("@/db").db,
@@ -128,17 +121,7 @@ export const corporateBookingsRouter = router({
         });
       }
 
-      const [{ count }] = await ctx.db
-        .select({ count: sql<number>`count(*)` })
-        .from(corporateBookings)
-        .where(
-          and(
-            eq(corporateBookings.classId, cls.id),
-            eq(corporateBookings.status, "booked"),
-          ),
-        );
-
-      const isFull = Number(count) >= cls.capacity;
+      const isFull = (await countCorporateBooked(ctx.db, cls.id)) >= cls.capacity;
 
       const created = await ctx.db
         .insert(corporateBookings)
