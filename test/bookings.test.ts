@@ -7,7 +7,11 @@ import {
   makeClass,
   fillClassBookings,
 } from "./helpers/fixtures";
-import { memberships as membershipsTable, bookings as bookingsTable } from "@/db/schema";
+import {
+  memberships as membershipsTable,
+  bookings as bookingsTable,
+  classes as classesTable,
+} from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 /**
@@ -401,6 +405,56 @@ describe("bookings router", () => {
         createTestCaller(db, member).bookings.markAttended({ bookingId: booking.id }),
       ).rejects.toMatchObject({ code: "FORBIDDEN", message: "Staff only." });
     });
+  });
+
+  describe("mine", () => {
+    it("filters out past bookings by default but includes them with includePast: true", async () => {
+      const member = await makeUser(db);
+      await makeMembership(db, member.id, { creditsRemaining: 5 });
+      const future = await makeClass(db, { hoursFromNow: 48 });
+      const past = await makeClass(db, { hoursFromNow: 48 }); // booked, then class time moved into the past
+      const caller = createTestCaller(db, member);
+      await caller.bookings.book({ classId: future.id });
+      const pastBooking = await caller.bookings.book({ classId: past.id });
+
+      // Move the class itself into the past after booking (book() would
+      // otherwise reject a class that's already started).
+      await db
+        .update(classesTable)
+        .set({ startsAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() })
+        .where(eq(classesTable.id, past.id));
+
+      const upcoming = await caller.bookings.mine();
+      expect(upcoming.map((b) => b.classId)).toEqual([future.id]);
+
+      const all = await caller.bookings.mine({ includePast: true });
+      expect(all.map((b) => b.classId).sort()).toEqual([future.id, past.id].sort());
+      expect(all.find((b) => b.id === pastBooking.id)).toBeTruthy();
+    });
+  });
+
+  describe("checkinCountFor", () => {
+    it(
+      "only counts individual checkins — corporate attendance is invisible here too " +
+        "(known-issues.md #5, seen from the individual side)",
+      async () => {
+        const cls = await makeClass(db, { hoursFromNow: 48 });
+        const member = await makeUser(db);
+        await makeMembership(db, member.id, { creditsRemaining: 5 });
+        const booking = await createTestCaller(db, member).bookings.book({
+          classId: cls.id,
+        });
+        const staff = await makeUser(db, { role: "admin" });
+        await createTestCaller(db, staff).bookings.markAttended({
+          bookingId: booking.id,
+        });
+
+        const result = await createTestCaller(db, staff).bookings.checkinCountFor({
+          classId: cls.id,
+        });
+        expect(result.count).toBe(1);
+      },
+    );
   });
 
   describe("waitlisted", () => {

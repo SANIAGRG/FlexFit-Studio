@@ -7,10 +7,12 @@ import {
   companyMembers,
   bookings,
   corporateBookings,
+  payments,
   type User,
   type GymClass,
   type Membership,
   type Company,
+  type Payment,
 } from "@/db/schema";
 import { hashPassword } from "@/lib/password";
 import type { TestDb } from "./db";
@@ -133,6 +135,24 @@ export async function fillClassBookings(db: TestDb, cls: GymClass, count: number
       creditsUsed: cls.creditCost,
     });
   }
+}
+
+export async function makePayment(
+  db: TestDb,
+  userId: number,
+  overrides: Partial<typeof payments.$inferInsert> = {},
+): Promise<Payment> {
+  return db
+    .insert(payments)
+    .values({
+      userId,
+      amountCents: 100000,
+      method: "card",
+      status: "paid",
+      ...overrides,
+    })
+    .returning()
+    .get();
 }
 
 export async function fillCorporateBookings(

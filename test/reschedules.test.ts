@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { createTestDb, type TestDb } from "./helpers/db";
 import { createTestCaller } from "./helpers/caller";
 import { makeUser, makeMembership, makeClass, fillClassBookings } from "./helpers/fixtures";
@@ -16,6 +16,7 @@ describe("reschedules router", () => {
   });
 
   afterAll(() => close());
+  afterEach(() => vi.useRealTimers());
 
   describe("reschedule — happy path", () => {
     it("moves the booking, carries credits forward, cancels the original, records history", async () => {
@@ -64,6 +65,29 @@ describe("reschedules router", () => {
       });
 
       expect(result.newStatus).toBe("waitlisted");
+    });
+
+    it("treats exactly 4h remaining as reschedulable (boundary is inclusive, mirrors the 12h cancellation boundary)", async () => {
+      const member = await makeUser(db);
+      await makeMembership(db, member.id, { creditsRemaining: 5 });
+      const fromStartsAt = new Date("2026-07-01T12:00:00.000Z");
+
+      vi.useFakeTimers({ now: new Date("2026-06-01T00:00:00.000Z") });
+      const from = await makeClass(db, {
+        name: "Boundary Class",
+        startsAt: fromStartsAt.toISOString(),
+      });
+      const to = await makeClass(db, { name: "Boundary Class", hoursFromNow: 9999 });
+      const caller = createTestCaller(db, member);
+      const original = await caller.bookings.book({ classId: from.id });
+
+      vi.setSystemTime(new Date("2026-07-01T08:00:00.000Z")); // exactly 4h before fromStartsAt
+      const result = await caller.reschedules.reschedule({
+        fromBookingId: original.id,
+        toClassId: to.id,
+      });
+
+      expect(result.ok).toBe(true);
     });
   });
 
