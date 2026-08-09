@@ -1,0 +1,38 @@
+# Architecture decisions
+
+First draft, written while discovery is fresh (Aug 8 work), ahead of any actual refactoring — no source file outside `documents/`, `test/`, `vitest.config.ts`, and `drizzle.config.ts` has been touched yet. This will be revisited once characterization tests are complete for all four priority routers, but the calls below are deliberate, not placeholders.
+
+---
+
+## The central question: do individual and corporate bookings unify?
+
+**Decision: keep them separate.** Share only the logic that is genuinely identical (`hoursUntil`, and the two `FREE_*_HOURS`/`UNLIMITED_CREDITS` constants live side by side in one file without being merged into one value). Do not build a unified `isBookingFull(classId)` or a shared `bookings`-and-`corporateBookings` capacity check.
+
+**Why.** The two tables are not two views on one concept that happen to be implemented twice — they currently produce genuinely different, currently-shipping answers to "is this class full," and merging the counting is a behavior change (`behavior-spec.md`'s cross-router note: five of six occupancy sites are individual-only or corporate-only, never both). Under the working brief's hard constraint — every current input/output/error/edge case must behave exactly as it does today — unifying the count *is* a behavior change no matter how it's phrased, because today a `capacity: 10` class can hold 10 individual + 10 corporate bookings simultaneously, and any single shared counter collapses that to one 10-person total. That's not preserving behavior with cleaner code; it's fixing bug behavior a reviewer would reasonably call a bug, but fixing it is explicitly out of scope for this pass (see `known-issues.md`, which documents it instead).
+
+**The alternative considered:** a unified booking model (one table, a `channel: 'individual' | 'corporate'` discriminator) is the more "correct" long-term shape and is the natural answer if this were a greenfield design. Rejected for *this* pass specifically because migrating two tables into one, live, with sixteen call sites across five routers, cannot be done in a way that's provably behavior-preserving in the time available, and the brief scores "moves less code and proves it moves none of the behavior" above "restructures everything and can't prove it." Recorded as a candidate for `if-i-had-two-more-weeks.md` (Tier 2), not attempted here.
+
+## What gets extracted
+
+`src/server/booking/` (new), matching the layout the handover proposed:
+
+- **`time.ts`** — `hoursUntil`, the one copy. Byte-identical across `bookings.ts`, `corporate-bookings.ts`, `reschedules.ts` today (confirmed in `discovery-log.md`); this is the only extraction in the whole set with zero risk of behavior drift, since there is no divergence to accidentally erase.
+- **`constants.ts`** — `FREE_CANCELLATION_HOURS`, `CORPORATE_FREE_CANCELLATION_HOURS`, `FREE_RESCHEDULE_HOURS`, `UNLIMITED_CREDITS` as four separately-named exports in one file, each with a comment on why its value is what it is. One file for discoverability; the values themselves stay unmerged (`decision-log.md`).
+- **`capacity.ts`** — occupancy counting, but shaped to *preserve* the six-not-four split, not collapse it. Two exported functions, not one: `countIndividualBooked(db, classId)` and `countCorporateBooked(db, classId)`, each a straight extraction of one existing query with no behavior change. `admin.classUtilisation`'s `booked + attended` count is **not** routed through either of these — it takes an explicit status-set parameter (or stays a separate `countIndividualForUtilisation` function) so the file makes the divergence structurally visible rather than hiding it behind a shared default. A reader of this file should not be able to accidentally call the wrong one and get away with it; the two functions have different names, not different optional parameters, specifically so autocomplete doesn't let you reach for the wrong one by habit.
+- **`reschedule-rules.ts`** — the ~11-step validation ladder as one pure function returning a discriminated result (`{ ok: true, targetIsFull: boolean } | { ok: false, code: TRPCError["code"], reason: string }`), with message strings defined once. `reschedule` maps failures to `throw new TRPCError(...)`; `validateReschedule` maps the same result to `{ valid: false, reason }`. The characterization tests in `reschedules.test.ts` (`reschedule / validateReschedule agreement`) exist specifically to prove this extraction doesn't change either path's outputs — they run against the *current* duplicated code today and must stay green, unmodified, once the extraction lands.
+
+## What does not get extracted, and why
+
+- **Individual vs. corporate `book`/`cancel`/`markAttended` bodies.** Structurally parallel, but every parallel section has at least one intentional divergence (window length, unlimited-credits handling, promotion-affordability logic per `known-issues.md` #1). A shared "template" would need enough parameters and branches to handle every divergence that it would be less readable than two separate, shorter functions — the traditional sign an abstraction is premature rather than earned.
+- **The 12h/24h/4h windows into one constant.** Covered in `decision-log.md`; kept as three separately-named exports.
+- **`checkins` handling between `bookings.markAttended` and `corporateBookings.markAttended`.** The corporate side's `bookingId: null` /dropped-`source` behavior (`known-issues.md` #5) looks like it should be "fixed while we're in here," but fixing it changes what gets recorded, which is explicitly a behavior change. Documented, not touched.
+
+## Layout defense
+
+Both reference frameworks decline to prescribe a required layout — that's deliberate context, not an oversight to route around. Next.js's own docs state it is unopinionated about how you organize and colocate project files inside `app/`, and only provides routing conventions, not a mandated module structure. tRPC's guidance is sub-routers per domain merged into one root router — which `_app.ts` already does, correctly, before any refactor touches it.
+
+So the defense for `src/server/booking/` isn't "this is the standard layout" (there isn't one to point to) — it's: *the router composition already matched the tRPC reference; the actual problem was domain logic (the validation ladder, the occupancy counts, the constants) living inline inside procedures instead of being named and testable on its own. This refactor moves the logic out and leaves the composition — `_app.ts`, the router files themselves, their procedure-level shapes — alone.* `server/booking/` sits next to `server/routers/`, its only consumer, rather than at `src/domain/`, because nothing outside the routers needs it.
+
+## Status
+
+First draft. To be revisited once `payments` characterization tests exist and the full coverage matrix is green against unrefactored code — per the working brief, no extraction begins before that point.

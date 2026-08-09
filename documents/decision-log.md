@@ -1,0 +1,13 @@
+# Decision log
+
+Running log of non-obvious decisions, one entry each: what was chosen, what the alternative was, why. Appended as work happens, not written retroactively.
+
+---
+
+**No browser automation tool for the orientation walkthrough.** Alternative: skip the "log in as each role and click through" step entirely, or fake it. Chose instead to substitute source reading (every router read end to end) plus `curl`-driven tRPC calls against the real running dev server (login → cookie → protected query, on real seeded data) as the closest available equivalent, and to say so explicitly in `discovery-log.md` rather than imply a UI walkthrough happened. Why: the brief is explicit that AI use is judged on whether it's disclosed honestly, and every rule in scope for this refactor is server-side, so the substitute covers the behavior that matters even though it's weaker for pure UI concerns.
+
+**Test DB strategy: temp SQLite file per test file, not `:memory:`.** Alternative: libSQL in-memory database. Chose a temp file (`DB_FILE` env var, per the seam the handover identified in `src/db/index.ts`) pushed with the real Drizzle schema before each run. Why: `@libsql/client`'s in-memory mode is a distinct code path from file mode and isn't what production uses; a temp file is closer to real behavior for negligible extra cost (SQLite temp-file I/O is fast), and matches exactly what `db:push` already does against `flexfit.db`, so the same push mechanism is reused rather than re-implemented for tests.
+
+**`createCaller` over spinning up an HTTP server in tests.** Alternative: start the Next.js server and hit it with `fetch`/`supertest`. Chose `appRouter.createCaller({ db, user, token })` directly. Why: the handover already identified that `createContext()` calls `cookies()` from `next/headers`, which throws outside a real Next.js request — so an HTTP-level test would need to fake cookies/headers anyway. `ctx` is just `{ db, user, token }` and every router reads only `ctx.db`/`ctx.user`, so constructing that context object directly is both correct and far faster per test than booting a server.
+
+**Time control via `vi.useFakeTimers({ now })` per test, not a single global freeze.** Alternative: freeze time once in a global setup file. Chose per-test `vi.setSystemTime`/fake timers scoped to each test (restored in `afterEach`). Why: the boundary conditions being tested (12h / 24h / 4h cutoffs) are relative to `new Date()` at call time, and different tests need different "now" values relative to a class's `startsAt` to hit exactly-at-boundary vs. just-inside vs. just-outside cases. A single global freeze would force all fixtures to be constructed relative to one fixed instant, which is more fragile than letting each test pick its own "now."
