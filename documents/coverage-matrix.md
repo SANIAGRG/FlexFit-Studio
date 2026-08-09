@@ -84,4 +84,8 @@ No corporate path exists to test here (confirmed absent — see `behavior-spec.m
 
 ## `admin.classUtilisation`, `classes.list`
 
-Not under test directly yet, but both are load-bearing for the six-not-four occupancy finding (`behavior-spec.md` cross-router note) and must get regression coverage before `capacity.ts` is extracted, specifically to prove `classUtilisation`'s `booked + attended` count doesn't collapse into the five other sites' `booked`-only count.
+| Spec claim | Test |
+|---|---|
+| Bug #9: `classUtilisation` reports the same `booked` count for every class, regardless of actual bookings | `admin.test.ts` › `classUtilisation` › "BUG (known-issues.md #9): reports the same booked count for every class…" |
+
+This test was written *before* the fix and pins the current wrong values deliberately — it is expected to be rewritten as part of the bug #9 fix commit, at which point it should assert the correct, differentiated counts instead, and the diff of that rewrite is itself part of the evidence the fix was deliberate. `classes.list`'s `spotsLeft`/`full` were confirmed correct via the same `.toSQL()` audit that found the bug (not through a dedicated test yet) — its query shape includes a join, which is exactly why it's unaffected; see `known-issues.md` bug #9 for the full comparison.

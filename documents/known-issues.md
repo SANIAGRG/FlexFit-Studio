@@ -1,6 +1,6 @@
 # Known issues
 
-Pre-existing bugs found while reading the routers for the refactor. None of these are fixed — per the working brief, the default is to document, not fix, unless explicitly asked. Each entry has exact repro steps so a reader can verify the finding in a minute without re-deriving it.
+Pre-existing bugs found while reading the routers for the refactor. Each entry has exact repro steps so a reader can verify the finding in a minute without re-deriving it. Default is to document, not fix, per the working brief — **bug #9 is the one deliberate exception**, fixed in its own commit with the reasoning stated at that entry.
 
 ---
 
@@ -91,3 +91,63 @@ All capacity checks, credit checks, and balance updates are separate `select` th
 **Repro:** get three members waitlisted for the same full class in rapid succession (all within one second — realistic under any real burst of demand, e.g. a popular class going live). All three see `position: 1`, not `1`, `2`, `3`. Reproduced directly in `test/bookings.test.ts` (`gives every booking in the same wall-clock second the same position`); a second test in the same file confirms position ordering *does* work correctly once real time is allowed to advance between bookings, isolating the resolution limit as the specific cause rather than a broader logic error.
 
 **Decision:** documented only. Fixing this would mean either a higher-resolution timestamp column or an explicit sequence/tiebreaker column — either is a schema change, which is out of scope for a behavior-preserving refactor and affects ordering semantics other code may implicitly depend on.
+
+---
+
+### 9. `admin.classUtilisation` reports the same booked count for every class — the report is non-functional
+
+**Found via characterization testing, not in the original brief's list. This is the exception to "document by default" — see Decision below.**
+
+**Where:** `admin.ts` `classUtilisation` (~line 63-87). The `booked` column is a raw `sql` template subquery:
+
+```sql
+select "id", "name", (
+  select count(*) from "bookings"
+  where "class_id" = "id"
+    and "status" in ('booked','attended')
+) as "booked" from "classes" where "classes"."cancelled" = ?
+```
+
+(Verified with Drizzle's own `.toSQL()` against the exact query shape in source, not reconstructed by hand.) Both `"class_id"` and `"id"` in the `WHERE` clause are unqualified. Drizzle qualifies column references (`"classes"."id"`) when the outer query has more than one table registered in its builder state (e.g. a join is present), and renders them bare when only one table is — here, `classes` alone. The subquery's own `FROM` is `bookings`, which is the innermost scope, so the bare `"id"` resolves to `bookings.id`, not the intended `classes.id`. The predicate is literally `bookings.class_id = bookings.id` — a condition with no dependency on the outer class row at all, so the subquery returns one fixed value, repeated for every row in the result set.
+
+**Contrast — the sibling query that looks identical but isn't buggy:** `classes.ts` `list` (~line 24-45) has the same raw-subquery shape but its outer query has a `leftJoin(users, ...)`, so Drizzle renders everything qualified:
+
+```sql
+select "classes"."id", ... , (
+  select count(*) from "bookings"
+  where "bookings"."class_id" = "classes"."id"
+    and "bookings"."status" = 'booked'
+) as "booked" from "classes" left join "users" on "classes"."trainer_id" = "users"."id" ...
+```
+
+`spotsLeft`/`full` on the member-facing schedule page are correct. Only the admin-facing report is affected.
+
+**Symptom, confirmed against the real seeded database** (`flexfit.db`, via a script run outside the test suite comparing the buggy query to a properly-correlated one row by row):
+
+```
+BUGGY (current code):        CORRECT (properly correlated, same data):
+HIIT Circuit    booked=1     HIIT Circuit    booked=0
+Spin 45         booked=1     Spin 45         booked=4
+Power Vinyasa   booked=1     Power Vinyasa   booked=8
+Boxing Fund.    booked=1     Boxing Fund.    booked=0
+Advanced Spin   booked=1     Advanced Spin   booked=17
+Sunrise Yoga    booked=1     Sunrise Yoga    booked=4
+```
+
+Every class currently reports `booked: 1` regardless of its actual booking count. **Observable effect: the admin utilisation report shows an identical booked count and utilisation percentage for every class**, all the time, on real data — not an edge case.
+
+**Repro:** reproduced deterministically in `test/admin.test.ts` — two classes, one with 3 real `booked` bookings and one with none, both report the same `booked` value, which is also not the real count of 3 for the class that has bookings.
+
+**Blast radius, audited repo-wide, not assumed:** grepped every router for raw `sql` template usage containing a nested `SELECT`/`select` (`grep -rn "SELECT|select" src/server/routers -i`, cross-checked against a plain-text scan for `sql\`(`). Found **seven** such nested-subquery sites, not two:
+
+- `admin.ts:73` (`classUtilisation`) — **buggy**, single-table outer scope, confirmed above.
+- `classes.ts:37` (`list`) — safe, outer query has a join, confirmed via `.toSQL()`.
+- `reschedules.ts:70,74,78,82,86` (`history`, five subqueries denormalizing from/to class name/time/room) — safe, confirmed via `.toSQL()`: the outer query already joins `classes` (`innerJoin(classes, eq(reschedules.fromClassId, classes.id))`), so every reference renders qualified (`"classes"."id" = "reschedules"."from_class_id"`), and even where it wouldn't, the specific column names involved (`from_class_id`, `to_class_id`) don't collide with any column in `classes`, so there's no name that could shadow-bind incorrectly the way `bookings.id`/`classes.id` did.
+
+So the actual finding is narrower and more precise than "raw subqueries are risky here": the bug requires *both* an unqualified render *and* a same-named column colliding across the two tables involved. Only one site has both.
+
+**Decision: fix it. This is the one exception to "document by default" among the nine findings in this file.**
+
+The other eight stay documented-only because "correct" is a product decision with no obviously right answer — should an unfunded waitlist promotion fail, or go through at negative credits? Genuinely ambiguous, not this refactor's call to make. This one is different: a correlated subquery is correlated by definition; nobody intended `bookings.class_id = bookings.id`. The intended behavior — count bookings for *this* class — is written plainly in the source (`${bookings.classId} = ${classes.id}` in the template), and the framework silently discarded that intent at render time. Restoring it invents no new rule; it makes the code do what it already, visibly, was trying to do. It is also a data-correctness defect in a report a staff member could make real decisions from, and the blast radius is now precisely measured at one call site.
+
+**The tension, named explicitly rather than glossed over:** fixing this changes `admin.classUtilisation`'s observable output — every `booked` and `utilisation` value in its response changes for every class. "Same outputs" is the headline constraint of this entire project, and this is a deliberate, acknowledged exception to it, not an oversight. The alternative — leaving a report that shows every class as identically utilised, forever, as "preserved behavior" — would be worse than the inconsistency of one documented exception: it isn't behavior anyone relies on or could rely on (a report where every row is identical carries no information), and preserving it as-is would mean knowingly shipping a broken report to protect a rule whose purpose is protecting *working* behavior. See `architecture-decisions.md` for the fix itself and the options considered.
