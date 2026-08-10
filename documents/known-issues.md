@@ -2,6 +2,8 @@
 
 Pre-existing bugs found while reading the routers for the refactor. Each entry has exact repro steps so a reader can verify the finding in a minute without re-deriving it. Default is to document, not fix, per the working brief — **bug #9 is the one deliberate exception**, fixed in its own commit with the reasoning stated at that entry.
 
+Discovery started with the four priority routers (`bookings`, `corporate-bookings`, `reschedules`, `payments`) and #1-#9 come from that pass. #10-#14 come from a second pass over the remaining routers (`classes`, `plans`, `trainers`, `admin-companies`) and payments' full blast radius, plus reading `seed.ts` directly against the routers rather than the routers alone — which is what surfaces #6's fuller scope below.
+
 ---
 
 ### 1. Waitlist promotion is asymmetric between individual and corporate bookings
@@ -60,13 +62,19 @@ Separately, `bookingsRouter.checkinCountFor` does `innerJoin(bookings, eq(checki
 
 ---
 
-### 6. `waitlist_promotion` notifications are never sent
+### 6. Three of four notification types are never inserted by the running app — only seeded
 
-**Where:** schema (`schema.ts:134`) and seed (`seed.ts:323`) both reference the `waitlist_promotion` notification type; the actual promotion code (`bookings.ts` `cancel`, ~line 213-252, and the corporate equivalent) never inserts into `notifications` at all.
+**Where:** `schema.ts:134` defines `notifications.type` as `enum: ["waitlist_promotion", "class_cancelled", "membership_expiring", "announcement"]`. Grepping every router for a `notifications` insert (`grep -rn "insert(notifications)" src/server/routers`) finds exactly **one** call site: `notifications.ts` `broadcast` (~lines 65-72), which always inserts `type: "announcement" as const` — hardcoded, not derived from any input or condition. No other router ever inserts a `notifications` row of any type — not `bookings.ts` `cancel`'s waitlist-promotion path, not `classes.ts` `cancel` (see bug #10, failure 4), nowhere.
 
-This is broader than "the type is unused" — promoting a waitlisted member to a booked spot currently sends that member no notification of any kind, through any channel. The only place `waitlist_promotion` appears outside the schema enum is one hand-written sample row in seed data, which does not correspond to any code path that would actually produce it.
+So three of the four schema types — `waitlist_promotion`, `class_cancelled`, `membership_expiring` — are defined and never produced by any live code path. Only `announcement`, via the one admin broadcast action, is real.
 
-**Repro:** trigger a waitlist promotion (see bug #1's repro), then check `notifications` for the promoted user. No new row.
+**The seed disguise, and why it's the valuable half of this finding:** `seed.ts` (~lines 320-358) hand-inserts one sample row of each of the four types directly into `notifications`, including one `waitlist_promotion` and one `class_cancelled` row. A freshly seeded database therefore shows a populated, varied notification list for those seeded users — `notifications.list` and `.unreadCount` return real rows of all four types, because those read queries don't know or care how a row got there. Reading the routers alone (the first-pass discovery) suggested one narrow gap, waitlist promotions specifically. Reading `seed.ts` side by side with the routers is what surfaces the fuller picture: the notification feature *looks* fully wired in a freshly seeded demo, because the seed script performed, once, by hand, the exact insert the application code never performs on its own.
+
+**Repro:** trigger a waitlist promotion (bug #1's repro) or a class cancellation with active bookings (bug #10, failure 4) — in both cases no `notifications` row is inserted for the affected member. Compare against `notifications.list` for a freshly seeded user, which already shows a `waitlist_promotion` row and a `class_cancelled` row — both predate any real event; they're seed fixtures, not evidence that the code path which should produce them ever ran.
+
+**The systemic picture — read together with bugs #1 and #2:** these three findings aren't independent small gaps; they're one story about the waitlist feature specifically. A member gets promoted from the waitlist — possibly for free if they can't afford it, or without the ledger being charged on the corporate side (#1). If the seat was freed by a reschedule rather than a cancellation, the promotion may not happen at all (#2). Either way, the promoted member is never told (#6, this entry). Put together: a member can be silently promoted, charged credits, never notified, and never show up — wasting the exact seat the promotion was supposed to fill, which is the outcome the waitlist mechanism exists to prevent. No one of the three is catastrophic alone; together they describe a feature that doesn't reliably do what it's for.
+
+**Decision:** documented only, same reasoning as #1 and #2 — what "correct" looks like here (fail the promotion outright when unaffordable? backfill a notification retroactively? auto-refund a corporate pool?) is a product decision, not one a behavior-preserving refactor should make unilaterally.
 
 ---
 
@@ -159,8 +167,82 @@ So the actual finding is narrower and more precise than "raw subqueries are risk
 
 **One more thing worth stating plainly rather than leaving for a reviewer to flag:** the fixed query selects `name`, `startsAt`, and `capacity` while grouping only by `classes.id`. SQLite permits this — unlike stricter engines, it doesn't require every selected column to be in the `GROUP BY` list or wrapped in an aggregate. It's correct here specifically because `id` is the primary key: each group has exactly one possible value for those columns (there's only one row per class), so there's no ambiguity for SQLite to resolve arbitrarily. This is a property of `id` being a primary key, not a lenient behavior being relied on to paper over something.
 
-**Decision: fix it. This is the one exception to "document by default" among the nine findings in this file.**
+**Decision: fix it. This is the one exception to "document by default" among the fourteen findings in this file.**
 
 The other eight stay documented-only because "correct" is a product decision with no obviously right answer — should an unfunded waitlist promotion fail, or go through at negative credits? Genuinely ambiguous, not this refactor's call to make. This one is different: a correlated subquery is correlated by definition; nobody intended `bookings.class_id = bookings.id`. The intended behavior — count bookings for *this* class — is written plainly in the source (`${bookings.classId} = ${classes.id}` in the template), and the framework silently discarded that intent at render time. Restoring it invents no new rule; it makes the code do what it already, visibly, was trying to do. It is also a data-correctness defect in a report a staff member could make real decisions from, and the blast radius is now precisely measured at one call site.
 
 **The tension, named explicitly rather than glossed over:** fixing this changes `admin.classUtilisation`'s observable output — every `booked` and `utilisation` value in its response changes for every class. "Same outputs" is the headline constraint of this entire project, and this is a deliberate, acknowledged exception to it, not an oversight. The alternative — leaving a report that shows every class as identically utilised, forever, as "preserved behavior" — would be worse than the inconsistency of one documented exception: it isn't behavior anyone relies on or could rely on (a report where every row is identical carries no information), and preserving it as-is would mean knowingly shipping a broken report to protect a rule whose purpose is protecting *working* behavior. See `architecture-decisions.md` for the fix itself and the options considered.
+
+---
+
+### 10. `classes.cancel` doesn't actually cancel a class — it only marks it cancelled and drops confirmed individual bookings, leaving credits, waitlists, corporate bookings, and notifications all untouched
+
+**Where:** `classes.ts` `cancel` (lines 132-154). The whole mutation, in full:
+
+```ts
+const cls = await ctx.db.update(classes).set({ cancelled: true })
+  .where(eq(classes.id, input.id)).returning().get();
+// ...NOT_FOUND check...
+await ctx.db.update(bookings)
+  .set({ status: "cancelled", cancelledAt: new Date().toISOString() })
+  .where(and(eq(bookings.classId, input.id), eq(bookings.status, "booked")));
+return cls;
+```
+
+That's the entire function. `classes.ts`'s imports (line 4) are `classes, bookings, users` only — no `memberships`, no `corporateBookings`, no `notifications`. The four failures below aren't four independent omissions; they're symptoms of one function that only ever had the ability to touch two of the four tables a real class cancellation needs to touch.
+
+**Four distinct failures, each independently reproducible:**
+
+1. **No credit refund.** The `bookings` update flips matching rows to `status: "cancelled"` but never reads or writes `memberships.creditsRemaining`. **Repro:** book a class as a member with a real membership (note `creditsRemaining` drops by the class's `creditCost`, per `bookings.book`). Have an admin call `classes.cancel` on that class. The booking flips to `cancelled`; `creditsRemaining` is unchanged from its post-booking value — the member is out those credits for a class the gym cancelled, not them. Contrast with member-initiated `bookings.cancel` (≥12h out), which does refund in the equivalent situation: this path is strictly worse for the member than cancelling it themselves.
+
+2. **Waitlisted bookings are silently abandoned.** The update filters `eq(bookings.status, "booked")` — a `waitlisted` row for the same class matches neither this filter nor any other code path. **Repro:** get a member waitlisted on a full class, then have an admin cancel that class. Query that member's bookings — still `status: "waitlisted"`, `classId` pointing at a class with `cancelled: true`. Nothing in the app ever revisits or resolves it; the member is permanently waiting on a class that will never run.
+
+3. **`corporateBookings` is never touched at all.** Not filtered out of the update — not referenced by the function, period. **Repro:** book a class via `corporateBookings.book` (status `booked`, company pool decremented by `creditCost`). Admin cancels that class via `classes.cancel`. Query `corporateBookings` for that row (or `adminCompanies.getById`'s `recentBookings`) — still `status: "booked"`, pool never credited back. The company paid for a seat in a class that no longer exists, with nothing in the data to surface that.
+
+4. **No notification of any kind is sent.** The schema's `class_cancelled` type (`schema.ts:134`) exists specifically to describe this event, and `seed.ts` hand-inserts one sample `class_cancelled` row (bug #6, expanded above) — but `classes.cancel` doesn't import `notifications` and inserts nothing. This is the sharpest instance of bug #6's pattern: `class_cancelled`'s one obvious call site is this exact function, and it was written without it. **Repro:** after failure 1 or 3's repro, check `notifications` for the affected member or company contact — no new row. They find out only by separately noticing the booking is gone or the listing shows `cancelled`.
+
+**Why this is likely the most consequential finding in the app:** the rest of this document is edge-case timing (waitlist ties, concurrent requests) or one wrong number in one admin report. This is a routine admin action — the gym cancels a class, for ordinary reasons like a sick trainer or low signup — that silently costs members real credits, strands waitlisted members on a dead class, leaves a company's pool permanently short, and tells no one anything happened. Every other bug in this file is more contained than this one.
+
+**Decision:** documented only, not fixed, despite the severity — same standing reasoning as everywhere else in this file except #9: what "fixed" means here (full refund? partial? a grace window to un-cancel? does a corporate refund route through different logic than an individual one?) is a product decision outside this refactor's authority or scope. Flagged with full repro so it's a visible, informed deferral rather than something a reviewer has to find themselves.
+
+Given the severity, all four failures are also reproduced directly as characterization tests in `test/classes.test.ts` (`#10.1`-`#10.4`) — the same red/green proof bugs #1-9 have, rather than prose alone. #11-#14 remain documentation-only (see `coverage-matrix.md`).
+
+---
+
+### 11. `plans.subscribe` has no active-membership check — a member can hold several simultaneously-active memberships, and credits on all but one become unreachable
+
+**Where:** `plans.ts` `subscribe` (lines 21-70) inserts a new `memberships` row unconditionally — no check against the caller's existing memberships. `activeMembershipFor` (`bookings.ts` lines 10-27), the only place that later reads back "the" active membership, orders by `endDate` descending and takes one row — of several simultaneously-active memberships, only the latest-`endDate` one is ever used for booking.
+
+**Repro:** subscribe to a second plan while credits remain on the first (both rows land `status: "active"`, both have a `payments` row — lines 60-67). Book a class — `activeMembershipFor` returns only the later-`endDate` membership; the other's credits are never read or decremented again. Paid for, stranded.
+
+**Decision:** documented only — blocking a second subscription vs. carrying over or refunding the old one's credits is a product call this refactor doesn't own.
+
+---
+
+### 12. `payments.refund` never touches `bookings` — a member keeps attending classes booked with a membership that was just refunded
+
+**Where:** `payments.ts` `refund` (lines 73-107) updates `payments.status` to `refunded` and, if a membership is linked, cancels it (lines 99-104) — it never reads or writes `bookings`.
+
+**Repro:** book classes with credits from a membership, then refund the payment tied to it. The membership flips to `cancelled`, but those bookings stay `status: "booked"`, and staff can still `markAttended` them — `bookings.markAttended` checks only booking existence and `status === 'booked'`, nothing about the linked membership. The member keeps attending on a membership the gym already refunded.
+
+**Decision:** documented only — whether a refund should retroactively cancel already-`booked` seats is a product decision this refactor isn't positioned to make.
+
+---
+
+### 13. `trainers.checkAvailability` computes a real conflict check and is never called from anywhere
+
+**Where:** `trainers.ts` `checkAvailability` (lines 136-210) is a fully implemented trainer-conflict check with exactly one reference in the whole `src/` tree — its own definition (`grep -rn "checkAvailability" src`). `classes.ts` `create`/`update` (lines 81-130), the two places a trainer actually gets assigned a time slot, never call into it.
+
+**Repro:** create two classes for the same trainer with overlapping `startsAt`/`durationMin` windows via `classes.create`. Both succeed, no error — `checkAvailability` would flag exactly this as a conflict, but nothing invokes it.
+
+**Decision:** documented only — wiring it in would make a request that succeeds today start failing, which is out of scope regardless of how clearly it looks intended.
+
+---
+
+### 14. `companyMembers.linkMember`'s duplicate check is scoped to one company, not to the member — a member can be actively linked to more than one company, and which one "counts" is picked by an unordered query
+
+**Where:** `admin-companies.ts` `linkMember` (lines 145-201)'s duplicate guard checks `(userId, companyId)` together, not `userId` alone — stated precisely because the gap is narrower than "there is no check": it blocks re-linking to the same company but not linking to a second, different one. `corporate-bookings.ts` `getCompanyForMember` (lines 17-32) then picks whichever active-company link an unordered query (`.get()`, no `.orderBy`) returns first.
+
+**Repro:** link one member to two different active companies — neither `linkMember` call is rejected. Book a corporate class — the company charged is whichever `getCompanyForMember` happens to return first, not necessarily the expected one.
+
+**Decision:** documented only — whether a member should belong to one company only, or multi-company membership is intentional and needs a real tie-break, is a product call this refactor doesn't own.

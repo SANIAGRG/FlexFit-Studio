@@ -44,3 +44,21 @@ Honest running log, per session. Not scored per the brief, but the brief is expl
 **What was gotten wrong and self-corrected:** nothing required a second pass this session — each extraction step was typechecked and full-suite-tested before moving to the next, which is what caught problems immediately rather than after they'd compounded (there weren't any that reached a red test, unlike Aug 8). The closest thing to a correction was recognizing mid-step-4 that the original `capacity.ts` plan didn't fit reality and needs revising in the docs — not a mistake in code, but a plan that turned out to be wrong on contact with the actual query shapes, corrected before landing rather than after.
 
 **What was not attempted this session:** Tier 2 work (typed error catalog, admin/trainers/classes characterization tests, the `admin/companies/[id]` and `trainer/schedule` data-fetching duplication) — explicitly gated behind Tier 1 completion and the brief says to ask before starting any of it.
+
+---
+
+## Session: 2026-08-10
+
+**Tool:** Claude Code (Sonnet 5), continuing directly in this repo.
+
+**What it did, in order:**
+
+1. Verified six findings handed over as claims, not facts — read `classes.ts`, `plans.ts`, `payments.ts`, `trainers.ts`, `admin-companies.ts`, and `seed.ts` directly (grepping for call sites, not trusting descriptions) before writing anything. All six checked out exactly as described, including the more subtle ones: bug #14's guard genuinely exists but is scoped to `(userId, companyId)` rather than `userId` alone, and the notification-type finding required cross-referencing `seed.ts` against every router's `insert(notifications)` call site to confirm only `announcement` is ever produced by live code.
+2. Expanded `known-issues.md` #6 (three of four notification types are dead, disguised by seed data) and added five new entries, #10-#14, plus a systemic paragraph connecting #1/#2/#6 into one waitlist-reliability story. Added a section to `architecture-decisions.md` explaining why transactions were never added — the reasoning being that adding them is itself a behavior change the characterization suite structurally can't verify.
+3. **Sizing correction, caught by explicit feedback, not self-caught.** First draft of #11-#14 ran 10-15 lines each against an explicit "four or five lines each" instruction. Trimmed all four to tight `Where`/`Repro`/`Decision` paragraphs, keeping the verified line numbers and mechanism, cutting the restated commentary.
+4. **Evidence-strength gap, flagged proactively rather than left implicit.** Bugs #1-#9 each have a passing characterization test; #10-#14 were verified against source but had no test, a real asymmetry a reviewer could notice. Named it explicitly rather than let the new entries quietly carry weaker evidence than the rest of the document.
+5. Added `test/classes.test.ts` (4 characterization tests) for #10 only — the one flagged most consequential — leaving #11-#14 documentation-only per Tier 2 gating. Verified isolation before treating it as safe, not just after: each test file provisions its own temp SQLite db (structural isolation), confirmed by running `classes.test.ts` alone (4/4 green, no dependency on other files) and with `--sequence.shuffle` (order-independence within the file, since no fixture is shared across its four `it` blocks). Full suite re-run after: 70/70.
+
+**What was gotten wrong and self-corrected:** first version of the #10.2 test (waitlisted-booking-untouched) booked the waitlisted member without giving them a membership first — `bookings.book` requires an active membership before it will even waitlist someone, so the test failed on setup with `FORBIDDEN`, not on the actual assertion. Caught by the first test run, not review; fixed by adding the missing `makeMembership` call, re-ran green.
+
+**What was not attempted this session:** tests for #11-#14 (Tier 2, not asked for beyond #10), and the Aug 10 regression walk across all three roles (in progress, paused for this discovery pass).

@@ -2,6 +2,8 @@
 
 Every claim in `behavior-spec.md` mapped to the test that proves it. As of Aug 9 work, all four priority routers (`bookings`, `corporate-bookings`, `reschedules`, `payments`) are covered — 64 tests, all green against the untouched routers (`pnpm test`, confirmed stable across repeated runs). This is what turns "I preserved behavior" from a claim into a demonstration, and closes the Aug 9 checkpoint the working brief requires before any extraction begins.
 
+70 tests as of Aug 10: the 64 above, plus `admin.test.ts` (2 tests, added with the bug #9 fix) and `classes.test.ts` (4 tests, added to back known-issues.md #10 with the same red/green proof the other findings have — see the `classes.cancel` section below).
+
 ## `bookings`
 
 | Spec claim | Test |
@@ -90,3 +92,14 @@ No corporate path exists to test here (confirmed absent — see `behavior-spec.m
 | `classUtilisation` correctly aggregates and limits distinct classes, not pre-`groupBy` join rows | `admin.test.ts` › `classUtilisation` › "returns exactly `limit` classes, correctly aggregated, even when one has many bookings" |
 
 Bug #9 is fixed as of this commit — the test originally pinned the wrong values (see `known-issues.md` #9 and `decision-log.md` for the before/after and the fix candidates tested) and was rewritten in the same commit as the fix to assert the correct, differentiated counts instead; the diff of that rewrite is itself part of the evidence the fix was deliberate. `classes.list`'s `spotsLeft`/`full` were confirmed correct via the same `.toSQL()` audit that found the bug (not through a dedicated test) — its query shape includes a join, which is exactly why it was unaffected; see `known-issues.md` bug #9 for the full comparison.
+
+## `classes.cancel`
+
+| Spec claim | Test |
+|---|---|
+| Bug #10.1: cancelling a class does not refund credits for members who had booked it | `classes.test.ts` › "documented bugs" › "#10.1 — cancelling a class does not refund credits…" |
+| Bug #10.2: waitlisted bookings are untouched, left pointing at the now-cancelled class | `classes.test.ts` › "documented bugs" › "#10.2 — cancelling a class leaves waitlisted bookings untouched…" |
+| Bug #10.3: `corporateBookings` is never touched — seat and pool charge remain in effect | `classes.test.ts` › "documented bugs" › "#10.3 — cancelling a class never touches corporateBookings…" |
+| Bug #10.4: no notification is sent to any affected member | `classes.test.ts` › "documented bugs" › "#10.4 — cancelling a class sends no notification…" |
+
+Added specifically because #10 was flagged as the most consequential finding in `known-issues.md`; #11–#14 remain documentation-only, verified against source but without dedicated tests, consistent with the working brief gating further router test coverage (`classes`, `plans`, `trainers`, `admin-companies`) behind Tier 2. All four ran green against the unmodified `classes.cancel`, and the full 70-test suite was re-run afterward to confirm no interference with the existing bug #1-9 tests — each test file provisions its own isolated temp SQLite database (`test/helpers/db.ts`), so there is no shared state between files to begin with.
