@@ -1,8 +1,8 @@
 # Coverage matrix
 
-Every claim in `behavior-spec.md` mapped to the test that proves it. As of Aug 9 work, all four priority routers (`bookings`, `corporate-bookings`, `reschedules`, `payments`) are covered — 64 tests, all green against the untouched routers (`pnpm test`, confirmed stable across repeated runs). This is what turns "I preserved behavior" from a claim into a demonstration, and closes the Aug 9 checkpoint the working brief requires before any extraction begins.
+Every claim in `behavior-spec.md` mapped to the test that proves it — **70 tests total**, all green (`pnpm test`, confirmed stable across repeated runs). This is what turns "I preserved behavior" from a claim into a demonstration. That total was reached in two stages: the four priority routers (`bookings`, `corporate-bookings`, `reschedules`, `payments`) closed the Aug 9 checkpoint at 64 tests, which the working brief requires before any extraction begins; the Aug 10/11 session then added `admin.test.ts` and `classes.test.ts` to reach 70 (see below).
 
-70 tests as of Aug 10: the 64 above, plus `admin.test.ts` (2 tests, added with the bug #9 fix) and `classes.test.ts` (4 tests, added to back known-issues.md #10 with the same red/green proof the other findings have — see the `classes.cancel` section below).
+The breakdown: the 64 from the Aug 9 checkpoint above, plus `admin.test.ts` (2 tests, added with the bug #9 fix) and `classes.test.ts` (4 tests, added to back known-issues.md #10 with the same red/green proof the other findings have — see the `classes.cancel` section below), both landing in the Aug 10/11 session — 64 + 2 + 4 = 70.
 
 ## `bookings`
 

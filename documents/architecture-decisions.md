@@ -53,6 +53,6 @@ This is the one place in the whole refactor where the smallest diff was delibera
 
 ## Status
 
-As of Aug 9: all four extractions above (`time.ts`, `constants.ts`, `reschedule-rules.ts`, `capacity.ts`) are landed. Full test suite (64 tests) green after each individual extraction, not just at the end — `pnpm test` was run after every file change, per the working brief's "full suite after every change." Typecheck (`npx tsc --noEmit`) clean throughout. `src/app/`, `src/components/`, `_app.ts`, and every router's public procedure signatures are byte-for-byte unchanged; only what was *inside* procedure bodies moved.
+As of Aug 9: all four extractions above (`time.ts`, `constants.ts`, `reschedule-rules.ts`, `capacity.ts`) are landed. Full test suite (64 tests, the suite's size at that point) green after each individual extraction, not just at the end — `pnpm test` was run after every file change, per the working brief's "full suite after every change." Typecheck (`npx tsc --noEmit`) clean throughout. `src/app/`, `src/components/`, `_app.ts`, and every router's public procedure signatures are byte-for-byte unchanged; only what was *inside* procedure bodies moved. (The suite grew to 70 tests by the Aug 10/11 session — current count and breakdown in `coverage-matrix.md`.)
 
 `admin.classUtilisation`'s bug #9 fix (above) is the one deliberate exception to that "unchanged behavior" status — its output values change, by design, per the tension named explicitly in `known-issues.md` #9.
